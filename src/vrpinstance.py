@@ -1,73 +1,16 @@
-"""VRPInstance with embedded HGS-style CVRP solver (stencil-compatible).
-
-The class signature, attributes, and `solve()` API match the course
-stencil exactly:
-  - `__init__(self, filename: str)` loads the instance.
-  - `solve(self)` takes NO arguments and returns `(solution, objective)`.
-  - `load_from_file(self, filename)` parses the .vrp text format.
-  - Public attributes: numCustomers, numVehicles, vehicleCapacity,
-    demandOfCustomer, xCoordOfCustomer, yCoordOfCustomer.
-  - `__str__` is preserved.
-
-`solve()` returns `(solution_string, objective_value)`:
-  - `solution_string` is the handout-spec format
-    "<flag> <r1> <r2> ... <rV>" (flag=0, V routes, depot-bracketed).
-  - `objective_value` is a float (the total Euclidean travel distance).
-The stencil's main.py prints these verbatim into the JSON output.
-
-Time budget (seconds) is read from the VRP_TIME_BUDGET environment
-variable (default 290 = 5min - 10s flush buffer). Random seed comes from
-VRP_SEED (default 42). The bundled runAll.sh sets VRP_TIME_BUDGET
-automatically.
-
-Gains over the previous version (baseline.py):
-
-  1. Per-route prefix-demand cache. The previous 2-opt* and or-opt code
-     re-summed suffix demands inside an O(N*k) loop, eating ~15% of the
-     entire runtime in `sum()` calls (confirmed by cProfile). Capacity
-     checks are now O(1).
-
-  2. CROSS-exchange operator (segment swap, lengths 1-2 each, both
-     reversals). Closes a neighborhood gap between or-opt and SWAP*.
-
-  3. Cleaner & faster SWAP* (Vidal et al.). Same complexity, but the dead
-     branch and redundant work are gone, giving ~2x throughput on this
-     operator.
-
-  4. 2-opt* checks both edge orientations from each customer (predecessor
-     edge AND successor edge). The original only checked one.
-
-  5. Adaptive LNS: three destroy operators (related, SISR string,
-     worst-cost) with simple roulette-wheel selection on past success.
-
-  6. Larger polish slice for the largest tier - SWAP*/CROSS need time to
-     converge and that pays off more than fast iteration.
-
-  7. Final intensive polish: at the end, every customer's DLB is reset
-     and LS is re-run to local optimum on the incumbent.
-
-Public API matches the stencil: VRPInstance(filename) -> .solve() -> (sol_str, obj).
-"""
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import dataclass
 import math
 import os
 import random
 import time
-from typing import Iterable, Sequence
+from typing import Sequence
 
 import numpy as np
 
-
-Route = list
 Routes = list
 
-
-# =============================================================================
-# VRPInstance
-# =============================================================================
 class VRPInstance:
     numCustomers: int
     numVehicles: int
@@ -84,7 +27,7 @@ class VRPInstance:
         self._dist_rows: list | None = None
 
     def solve(self):
-        # Time budget (seconds): default 290 = 5min - 10s flush buffer.
+
         try:
             time_budget = float(os.environ.get("VRP_TIME_BUDGET", "290"))
         except ValueError:
@@ -99,10 +42,6 @@ class VRPInstance:
             self, time_budget_s=time_budget, seed=seed
         )
 
-        # Format the solution string per the handout spec:
-        #   "<flag> <route_1> <route_2> ... <route_V>"
-        # flag=0 (heuristic, not proven optimal); V routes total, each
-        # depot-bracketed; empty vehicles render as "0 0".
         self.solution = _format_solution(routes, self.numVehicles, optimality_flag=0)
         self.objective_value = float(objective)
         return self.solution, self.objective_value
@@ -179,13 +118,7 @@ class VRPInstance:
             out += f"{self.demandOfCustomer[i]} {self.xCoordOfCustomer[i]} {self.yCoordOfCustomer[i]}\n"
         return out
 
-
-# =============================================================================
-# Solution formatting
-# =============================================================================
 def _format_solution(routes, num_vehicles, optimality_flag=0):
-    """Build "<flag> 0 <r1> 0 0 <r2> 0 ... 0 <rV> 0" with V routes total.
-    Empty vehicles render as "0 0"."""
     used = [list(r) for r in routes if r]
     while len(used) < num_vehicles:
         used.append([])
@@ -198,10 +131,6 @@ def _format_solution(routes, num_vehicles, optimality_flag=0):
         parts.append("0")
     return " ".join(parts)
 
-
-# =============================================================================
-# Helpers
-# =============================================================================
 def copy_routes(routes): return [list(r) for r in routes]
 
 def flatten_routes(routes):
@@ -216,10 +145,6 @@ def unique_preserve_order(items):
             seen.add(x); out.append(x)
     return out
 
-
-# =============================================================================
-# Repair (unchanged)
-# =============================================================================
 def split_giant_tour(instance, customer_order, max_routes=None):
     if max_routes is None:
         max_routes = instance.num_vehicles
@@ -281,7 +206,6 @@ def split_giant_tour(instance, customer_order, max_routes=None):
     routes.append(customer_order[prev:n])
     return routes, best[n][rc]
 
-
 def repair_routes(instance, routes):
     if _is_clean_feasible_cover(instance, routes):
         return [r[:] for r in routes if r], instance.routes_objective(routes)
@@ -293,7 +217,6 @@ def repair_routes(instance, routes):
     if sp is not None: return sp
     packed = greedy_capacity_pack(instance, sorted(candidate, key=lambda c: (-int(instance.demands[c]), c)))
     return packed, instance.routes_objective(packed)
-
 
 def greedy_capacity_pack(instance, customer_order):
     if not customer_order: return []
@@ -319,7 +242,6 @@ def greedy_capacity_pack(instance, customer_order):
         routes = exact
     return routes
 
-
 def best_insertion_delta(instance, route, customer):
     Drow = instance._dist_rows
     if not route:
@@ -334,7 +256,6 @@ def best_insertion_delta(instance, route, customer):
             best_delta = delta; best_pos = p
     return best_delta, best_pos
 
-
 def _is_clean_feasible_cover(instance, routes):
     if len(routes) > instance.num_vehicles: return False
     seen = set()
@@ -344,7 +265,6 @@ def _is_clean_feasible_cover(instance, routes):
             if c in seen or c <= 0 or c >= instance.num_nodes: return False
             seen.add(c)
     return seen == set(instance.customers)
-
 
 def _pack_by_backtracking(instance, customer_order):
     routes = [[] for _ in range(instance.num_vehicles)]
@@ -369,21 +289,15 @@ def _pack_by_backtracking(instance, customer_order):
     if not search(0): return None
     return [r for r in routes if r]
 
-
-# =============================================================================
-# Hybrid solver scaffolding
-# =============================================================================
 @dataclass
 class _SolverRun:
     routes: Routes
     objective: float
 
-
 def neighbor_count(instance):
     if instance.num_nodes <= 60: return min(20, instance.num_nodes - 1)
     if instance.num_nodes <= 180: return 30
     return 40
-
 
 def nearest_neighbor_sets(instance, k):
     instance._ensure_distance_matrix()
@@ -397,7 +311,6 @@ def nearest_neighbor_sets(instance, k):
         result[c] = [o for _, o in others[:k]]
     return result
 
-
 def add_routes_to_pool(instance, pool, routes):
     for r in routes:
         if not r: continue
@@ -405,7 +318,6 @@ def add_routes_to_pool(instance, pool, routes):
         ex = pool.get(k)
         if ex is None or instance.route_distance(r) < instance.route_distance(ex):
             pool[k] = list(r)
-
 
 def relaxed_nearest_tour_split(instance, rng, neighbors):
     customers = list(instance.customers)
@@ -423,25 +335,6 @@ def relaxed_nearest_tour_split(instance, rng, neighbors):
     if sp is None: return greedy_capacity_pack(instance, tour)
     return sp[0]
 
-
-# =============================================================================
-# IMPROVED LOCAL SEARCH (v3)
-#
-# State maintained:
-#   routes        : list of lists of customer ids
-#   loads[ri]     : sum of demands in routes[ri]                           (O(1) load lookup)
-#   route_pdem[ri]: prefix demand list, len = len(routes[ri])+1            (O(1) suffix/prefix)
-#   cust_route[c] : index of route containing c (or -1 if not placed)
-#   cust_pos[c]   : position of c within routes[cust_route[c]]
-#   dlb[c]        : True = skip; nodes whose neighborhood hasn't changed
-#
-# Operators (per customer or per route, first-improvement, DLB-gated):
-#   or_opt_from(c)       : relocate segment (1/2/3) starting at c, fwd or reversed
-#   two_opt_star_from(c) : exchange tails of routes (both orientations)
-#   swap_star_from(c)    : swap c with neighbor's customer, each at best position
-#   cross_exchange_from(c): swap segments (1-2 each) between two routes (4 variants)
-#   two_opt_intra(ri)    : intra-route 2-opt
-# =============================================================================
 def local_search_v3(instance, routes, neighbors, deadline):
     routes = [r[:] for r in routes if r]
     if not routes:
@@ -453,12 +346,10 @@ def local_search_v3(instance, routes, neighbors, deadline):
     demands_arr = instance.demandOfCustomer
     n = instance.num_nodes
 
-    # Plain Python list of demands for fast scalar access
     dem = [int(demands_arr[i]) for i in range(n)]
 
     loads = [sum(dem[c] for c in r) if r else 0 for r in routes]
 
-    # Per-route prefix-demand: route_pdem[ri][p] = sum of demands of routes[ri][:p]
     def build_pdem(r):
         pd = [0] * (len(r) + 1)
         s = 0
@@ -488,7 +379,8 @@ def local_search_v3(instance, routes, neighbors, deadline):
     def wake(c):
         if 0 < c < n: dlb[c] = False
 
-    # ------------------------------------------------------------------ or-opt
+    or_opt_seg_lens = (1, 2, 3) if n > 250 else (1, 2, 3, 4)
+
     def or_opt_from(c1):
         ri = cust_route[c1]
         if ri < 0: return False
@@ -497,7 +389,7 @@ def local_search_v3(instance, routes, neighbors, deadline):
         len1 = len(r1)
         pdem1 = route_pdem[ri]
 
-        for seg_len in (1, 2, 3):
+        for seg_len in or_opt_seg_lens:
             if i + seg_len > len1: break
             seg_demand = pdem1[i + seg_len] - pdem1[i]
             b = r1[i]; e = r1[i + seg_len - 1]
@@ -506,25 +398,20 @@ def local_search_v3(instance, routes, neighbors, deadline):
             Da = Drow[a]; De = Drow[e]; Db = Drow[b]
             delta_remove = Da[f] - Da[b] - De[f]
 
-            seen_pairs = set()
             cands = []
             for nbr in neighbors.get(b, ()):
                 r2i = cust_route[nbr]
                 if r2i < 0: continue
                 pos = cust_pos[nbr]
-                for p in (pos, pos + 1):
-                    key = (r2i, p)
-                    if key not in seen_pairs:
-                        seen_pairs.add(key); cands.append(key)
+                cands.append((r2i, pos))
+                cands.append((r2i, pos + 1))
             if e != b:
                 for nbr in neighbors.get(e, ()):
                     r2i = cust_route[nbr]
                     if r2i < 0: continue
                     pos = cust_pos[nbr]
-                    for p in (pos, pos + 1):
-                        key = (r2i, p)
-                        if key not in seen_pairs:
-                            seen_pairs.add(key); cands.append(key)
+                    cands.append((r2i, pos))
+                    cands.append((r2i, pos + 1))
 
             virt_len = len1 - seg_len
             for r2_idx, j in cands:
@@ -578,7 +465,6 @@ def local_search_v3(instance, routes, neighbors, deadline):
                     return True
         return False
 
-    # -------------------------------------------------------------- intra 2-opt
     def two_opt_intra(ri):
         r = routes[ri]
         L = len(r)
@@ -603,10 +489,6 @@ def local_search_v3(instance, routes, neighbors, deadline):
             i += 1
         return False
 
-    # ------------------------------------------------------- between 2-opt*
-    # Tail exchange: r1 = [...c1, x...] + r2 = [...v, y...] -->
-    #                r1 = [...c1, y...] + r2 = [...v, x...]
-    # Capacity: O(1) using prefix-demand (no more sum() in hot loop).
     def two_opt_star_from(c1):
         r1_idx = cust_route[c1]
         if r1_idx < 0: return False
@@ -615,7 +497,6 @@ def local_search_v3(instance, routes, neighbors, deadline):
         L1 = len(r1)
         pdem1 = route_pdem[r1_idx]
 
-        # ---- Variant A: c1 is at edge (c1 -> x). Tail of r1 starts at i+1.
         x = r1[i + 1] if i + 1 < L1 else 0
         suffix1_dem_A = pdem1[L1] - pdem1[i + 1]
         prefix1_dem_A = pdem1[i + 1]
@@ -649,8 +530,6 @@ def local_search_v3(instance, routes, neighbors, deadline):
                 for x_ in new_r2: wake(x_)
                 return True
 
-        # ---- Variant B: c1 is at edge (a -> c1). Tail of r1 starts at i.
-        # Same exchange but with r1 cut just BEFORE c1.
         a = r1[i - 1] if i > 0 else 0
         suffix1_dem_B = pdem1[L1] - pdem1[i]
         prefix1_dem_B = pdem1[i]
@@ -663,7 +542,7 @@ def local_search_v3(instance, routes, neighbors, deadline):
             j = cust_pos[v]
             L2 = len(r2)
             pdem2 = route_pdem[r2_idx]
-            # Edge (b -> v) where b = predecessor of v
+
             b = r2[j - 1] if j > 0 else 0
             suffix2_dem_B = pdem2[L2] - pdem2[j]
             prefix2_dem_B = pdem2[j]
@@ -671,7 +550,6 @@ def local_search_v3(instance, routes, neighbors, deadline):
             new_load2 = prefix2_dem_B + suffix1_dem_B
             if new_load1 > cap or new_load2 > cap: continue
 
-            # delta = D[a][v] + D[b][c1] - D[a][c1] - D[b][v]
             delta = Drow[a][v] + Drow[b][c1] - d_a_c1 - Drow[b][v]
             if delta < -1e-9:
                 new_r1 = r1[:i] + r2[j:]
@@ -686,7 +564,6 @@ def local_search_v3(instance, routes, neighbors, deadline):
                 return True
         return False
 
-    # ----------------------------------------------------------------- SWAP*
     def swap_star_from(u):
         r1_idx = cust_route[u]
         if r1_idx < 0: return False
@@ -717,8 +594,6 @@ def local_search_v3(instance, routes, neighbors, deadline):
             Dav = Drow[av]
             rem_v_cost = Dav[v] + Dv[bv] - Dav[bv]
 
-            # Best insertion of u into r2 with v removed.
-            # Walk implicit "0 -> r2[0] -> ... (skip iv) ... -> r2[L2-1] -> 0".
             best_ins_u = math.inf; best_ins_u_pos = 0
             prev_node = 0
             edge_idx = 0
@@ -763,9 +638,6 @@ def local_search_v3(instance, routes, neighbors, deadline):
                 return True
         return False
 
-    # -------------------------------------------------------- CROSS-exchange
-    # Swap segment seg1 = r1[i:i+L1seg] with seg2 = r2[j:j+L2seg].
-    # Lengths in {1,2}. Try fwd/fwd, rev1/fwd, fwd/rev2, rev1/rev2.
     def cross_exchange_from(c1):
         r1_idx = cust_route[c1]
         if r1_idx < 0: return False
@@ -807,9 +679,8 @@ def local_search_v3(instance, routes, neighbors, deadline):
                     old_r2 = Dg[s2a] + Drow[s2b][h]
                     old_total = old_r1 + old_r2
 
-                    # 4 orientation combinations; reverse only if seg length>1.
                     options = []
-                    # (seg2 fwd in r1, seg1 fwd in r2)
+
                     options.append((Da[s2a] + Drow[s2b][f] + Dg[s1a] + Drow[s1b][h],
                                     False, False))
                     if L2seg > 1:
@@ -841,7 +712,6 @@ def local_search_v3(instance, routes, neighbors, deadline):
                         return True
         return False
 
-    # ------------------------------------------------------------- main loop
     custs = list(range(1, n))
     iterations = 0
     while time.time() < deadline:
@@ -877,17 +747,7 @@ def local_search_v3(instance, routes, neighbors, deadline):
     routes = [r for r in routes if r]
     return routes, instance.routes_objective(routes)
 
-
-# Backward-compatible alias - other code calls local_search_v2.
-local_search_v2 = local_search_v3
-
-
-# =============================================================================
-# LNS - destroy operators with adaptive selection
-# =============================================================================
 def _related_removal(instance, routes, rng, target):
-    """Shaw-style: pick a seed, then iteratively pick customers near
-    a random already-removed reference."""
     Drow = instance._dist_rows
     all_c = [c for r in routes for c in r]
     if not all_c: return set()
@@ -902,11 +762,7 @@ def _related_removal(instance, routes, rng, target):
         removed.add(cands[idx])
     return removed
 
-
 def _string_removal(instance, routes, rng, target):
-    """SISR-style: pick a seed customer; remove a contiguous "string" from
-    each of several nearby routes. Strings of avg length L_max ~ avg route len.
-    """
     Drow = instance._dist_rows
     all_c = [c for r in routes for c in r]
     if not all_c: return set()
@@ -914,8 +770,7 @@ def _string_removal(instance, routes, rng, target):
     L_max = min(10, avg_route_len)
 
     seed = rng.choice(all_c)
-    # Walk nearest customers; for each, if its route hasn't been ruined yet,
-    # remove a random contiguous substring containing that customer.
+
     cust_route = {}
     for ri, r in enumerate(routes):
         for c in r:
@@ -933,7 +788,7 @@ def _string_removal(instance, routes, rng, target):
         if not r: continue
         L = max(1, min(L_max, len(r)))
         slen = rng.randint(1, L)
-        # contiguous string of length slen containing c
+
         cidx = r.index(c)
         lo = max(0, cidx - rng.randint(0, slen - 1))
         hi = min(len(r), lo + slen)
@@ -943,9 +798,7 @@ def _string_removal(instance, routes, rng, target):
         ruined_routes.add(ri)
     return removed
 
-
 def _worst_removal(instance, routes, rng, target):
-    """Pick customers whose removal saves the most distance, with noise."""
     Drow = instance._dist_rows
     all_c = []
     for r in routes:
@@ -957,38 +810,79 @@ def _worst_removal(instance, routes, rng, target):
     all_c.sort(reverse=True)
     removed = set()
     while len(removed) < target and all_c:
-        # noisy pick from top
+
         idx = int((rng.random() ** 2) * min(len(all_c), 12))
         removed.add(all_c.pop(idx)[1])
     return removed
 
-
 def _reinsert_greedy(instance, routes, removed, rng):
-    """Greedy regret-based reinsert."""
     new_routes = [[c for c in r if c not in removed] for r in routes]
     new_routes = [r for r in new_routes if r]
     cap = instance.vehicle_capacity
     demands = instance.demandOfCustomer
+
     pending = list(removed)
-    # Sort: heaviest first (capacity-tight)
-    pending.sort(key=lambda c: -int(demands[c]))
-    for c in pending:
-        bt, bp, bd = -1, 0, math.inf
-        d_c = int(demands[c])
-        for ri, r in enumerate(new_routes):
-            if instance.route_demand(r) + d_c > cap:
-                continue
-            d, p = best_insertion_delta(instance, r, c)
-            if d < bd: bd = d; bt = ri; bp = p
-        if bt < 0:
+    if len(pending) <= 3:
+
+        pending.sort(key=lambda c: -int(demands[c]))
+        for c in pending:
+            bt, bp, bd = -1, 0, math.inf
+            d_c = int(demands[c])
+            for ri, r in enumerate(new_routes):
+                if instance.route_demand(r) + d_c > cap:
+                    continue
+                d, p = best_insertion_delta(instance, r, c)
+                if d < bd: bd = d; bt = ri; bp = p
+            if bt < 0:
+                new_routes.append([c])
+            else:
+                new_routes[bt].insert(bp, c)
+        return new_routes
+
+    while pending:
+
+        route_dem_cache = [instance.route_demand(r) for r in new_routes]
+
+        best_choice = None                                                       
+        for c in pending:
+            d_c = int(demands[c])
+            best1_cost = math.inf; best1_ri = -1; best1_pos = 0
+            best2_cost = math.inf
+            for ri, r in enumerate(new_routes):
+                if route_dem_cache[ri] + d_c > cap:
+                    continue
+                d, p = best_insertion_delta(instance, r, c)
+                if d < best1_cost:
+                    best2_cost = best1_cost
+                    best1_cost = d; best1_ri = ri; best1_pos = p
+                elif d < best2_cost:
+                    best2_cost = d
+
+            if best1_ri < 0:
+                regret = math.inf                   
+
+                Drow = instance._dist_rows
+                best1_cost = Drow[0][c] + Drow[c][0]
+
+            elif math.isinf(best2_cost):
+                regret = math.inf                           
+            else:
+                regret = best2_cost - best1_cost
+
+            score = (regret, -best1_cost)
+            if best_choice is None or score > best_choice[0]:
+                best_choice = (score, best1_cost, c, best1_ri, best1_pos)
+
+        _, _, c, ri, pos = best_choice
+        if ri < 0:
             new_routes.append([c])
         else:
-            new_routes[bt].insert(bp, c)
+            new_routes[ri].insert(pos, c)
+        pending.remove(c)
+
     return new_routes
 
-
 _LNS_OPS = ['related', 'string', 'worst']
-
 
 def destroy_and_repair(instance, routes, rng, neighbors, deadline,
                        removal_frac=0.25, op_weights=None):
@@ -998,7 +892,6 @@ def destroy_and_repair(instance, routes, rng, neighbors, deadline,
     n = len(all_c)
     target = max(2, min(n - 1, int(n * removal_frac)))
 
-    # Roulette-wheel pick of operator
     if op_weights is None:
         op_weights = {k: 1.0 for k in _LNS_OPS}
     total = sum(op_weights.values())
@@ -1020,10 +913,6 @@ def destroy_and_repair(instance, routes, rng, neighbors, deadline,
     repaired, _ = repair_routes(instance, new_routes)
     return repaired, chosen
 
-
-# =============================================================================
-# Pool recombination
-# =============================================================================
 def route_pool_recombine(instance, pool, deadline, best_routes=None):
     if not pool: return None
     cands = []
@@ -1055,10 +944,6 @@ def route_pool_recombine(instance, pool, deadline, best_routes=None):
     repaired, _ = repair_routes(instance, sel)
     return repaired
 
-
-# =============================================================================
-# Sweep clustering
-# =============================================================================
 def sweep_clustering(instance, angle_offset=0.0):
     customers = list(instance.customers)
     if not customers: return []
@@ -1106,7 +991,6 @@ def sweep_clustering(instance, angle_offset=0.0):
         routes.append(tour)
     return routes
 
-
 def solve_hybrid(instance, time_budget_s, seed):
     rng = random.Random(seed)
     deadline = time.time() + max(0.05, time_budget_s)
@@ -1115,10 +999,6 @@ def solve_hybrid(instance, time_budget_s, seed):
     routes, _ = local_search_v3(instance, routes, neighbors, deadline)
     return _SolverRun(routes=routes, objective=instance.routes_objective(routes))
 
-
-# =============================================================================
-# HGS-style top-level search
-# =============================================================================
 def solve_hgs_search(instance, time_budget_s, seed, incumbent=None):
     started = time.time()
     budget = time_budget_s if time_budget_s is not None else 100
@@ -1134,13 +1014,12 @@ def solve_hgs_search(instance, time_budget_s, seed, incumbent=None):
     crossovers = 0
     no_improve_rounds = 0
 
-    # Adaptive LNS operator weights (smoothed success rate)
     op_weights = {'related': 1.0, 'string': 1.0, 'worst': 1.0}
     op_attempts = {'related': 0, 'string': 0, 'worst': 0}
     op_successes = {'related': 0, 'string': 0, 'worst': 0}
 
     def update_op_weights():
-        # Smooth weights = 0.1 + success_rate
+
         for k in _LNS_OPS:
             sr = op_successes[k] / max(1, op_attempts[k])
             op_weights[k] = 0.1 + sr
@@ -1149,8 +1028,13 @@ def solve_hgs_search(instance, time_budget_s, seed, incumbent=None):
         nonlocal best_routes, best_obj, best_origin
         if time.time() >= deadline: return False
         rep, _ = repair_routes(instance, cand)
+
         if polish and time.time() < deadline:
-            polish_dl = min(deadline, time.time() + hgs_polish_slice(instance))
+            raw_obj = instance.routes_objective(rep)
+            slice_s = hgs_polish_slice(instance)
+            if best_obj < math.inf and raw_obj > best_obj * 1.05:
+                slice_s *= 0.4                                                
+            polish_dl = min(deadline, time.time() + slice_s)
             rep, _ = local_search_v3(instance, rep, neighbors, polish_dl)
         obj = instance.routes_objective(rep)
         add_routes_to_pool(instance, pool, rep)
@@ -1180,13 +1064,37 @@ def solve_hgs_search(instance, time_budget_s, seed, incumbent=None):
             cand = sweep_clustering(instance, off)
         consider(cand, f"seed_{sr}")
 
-    # Reserve a small slice at the end for a final intensive polish.
     final_polish_budget = min(max(2.0, budget * 0.08), 8.0)
+    last_improve_time = time.time()
 
     while time_remaining(deadline) > 0.05 + final_polish_budget:
         improved_this_round = False
 
-        # 1) Crossover
+        elapsed_since_improve = time.time() - last_improve_time
+        if (elapsed_since_improve > 0.25 * budget and
+                len(population) >= 4 and
+                time_remaining(deadline) > 5.0 + final_polish_budget):
+
+            keep = len(population) // 2
+            population.sort(key=instance.routes_objective)
+            del population[keep:]
+            for _ in range(keep):
+                if time_remaining(deadline) <= 1.0 + final_polish_budget: break
+                bk = rng.randrange(4)
+                if bk == 0: cand = relaxed_nearest_tour_split(instance, rng, neighbors)
+                elif bk == 1:
+                    sb = min(hybrid_seed_budget(instance), max(0.05, time_remaining(deadline) * 0.05))
+                    cand = solve_hybrid(instance, sb, rng.randrange(1 << 30)).routes
+                elif bk == 2:
+                    order = sorted(instance.customers, key=lambda c: (-int(instance.demands[c]), rng.random()))
+                    cand = greedy_capacity_pack(instance, order)
+                else:
+                    off = rng.uniform(0, 2 * math.pi)
+                    cand = sweep_clustering(instance, off)
+                consider(cand, "diversify")
+            last_improve_time = time.time()                                 
+            continue
+
         if len(population) >= 2:
             pa, pb = select_parents(instance, population, rng)
             order = ordered_crossover(flatten_routes(pa), flatten_routes(pb), rng)
@@ -1196,7 +1104,6 @@ def solve_hgs_search(instance, time_budget_s, seed, incumbent=None):
             if consider(child, f"xo_{crossovers}"):
                 improved_this_round = True
 
-        # 2) Pool recombine
         if (pool and len(pool) >= instance.num_vehicles
                 and crossovers % 3 == 0
                 and time_remaining(deadline) > 0.05 + final_polish_budget):
@@ -1204,7 +1111,6 @@ def solve_hgs_search(instance, time_budget_s, seed, incumbent=None):
             if rec is not None and consider(rec, "pool"):
                 improved_this_round = True
 
-        # 3) LNS shake of best - adaptive operator + size
         if best_routes is not None and time_remaining(deadline) > 0.05 + final_polish_budget:
             base = 0.20 if not tight else 0.25
             rf = min(0.55, base + 0.05 * no_improve_rounds)
@@ -1218,13 +1124,11 @@ def solve_hgs_search(instance, time_budget_s, seed, incumbent=None):
                 op_successes[op_used] += 1
                 improved_this_round = True
 
-        # 4) Diversifying sweep kick when nothing else moved
         if not improved_this_round and time_remaining(deadline) > 0.10 + final_polish_budget:
             off = rng.uniform(0, 2 * math.pi)
             cand = sweep_clustering(instance, off)
             consider(cand, "kick_sweep")
 
-        # 5) Big kick on a non-best member after many stale rounds
         if no_improve_rounds >= 4 and len(population) > 0 and time_remaining(deadline) > 0.15 + final_polish_budget:
             victim = rng.choice(population)
             update_op_weights()
@@ -1240,8 +1144,9 @@ def solve_hgs_search(instance, time_budget_s, seed, incumbent=None):
                 no_improve_rounds = 0
 
         no_improve_rounds = 0 if improved_this_round else (no_improve_rounds + 1)
+        if improved_this_round:
+            last_improve_time = time.time()
 
-    # ------------ Final intensive polish on incumbent (DLBs reset) -----------
     if best_routes is not None and time_remaining(deadline) > 0.1:
         final_dl = deadline
         polished, polished_obj = local_search_v3(instance, best_routes, neighbors, final_dl)
@@ -1269,7 +1174,6 @@ def solve_hgs_search(instance, time_budget_s, seed, incumbent=None):
         },
     )
 
-
 def add_to_population(instance, pop, routes):
     cleaned = [r[:] for r in routes if r]
     sig = tuple(tuple(r) for r in cleaned)
@@ -1278,7 +1182,6 @@ def add_to_population(instance, pop, routes):
     pop.sort(key=instance.routes_objective)
     del pop[max_population_size(instance):]
 
-
 def _edge_set(routes):
     edges = set()
     for r in routes:
@@ -1286,7 +1189,6 @@ def _edge_set(routes):
         for x, y in zip(path, path[1:]):
             edges.add((x, y))
     return edges
-
 
 def select_parents(instance, pop, rng):
     s = min(len(pop), 5)
@@ -1299,7 +1201,6 @@ def select_parents(instance, pop, rng):
         b = pop[1] if pop[0] is a else pop[0]
     return a, b
 
-
 def ordered_crossover(pa, pb, rng):
     if len(pa) < 3: return pa[:]
     s = rng.randrange(0, len(pa) - 1)
@@ -1308,29 +1209,19 @@ def ordered_crossover(pa, pb, rng):
     rem = [c for c in pb if c not in ss]
     return rem[:s] + seg + rem[s:]
 
-
-# =============================================================================
-# Tier helpers (slightly tuned for the largest tier)
-# =============================================================================
-def default_hgs_budget(instance):
-    if instance.num_nodes <= 60: return 18.0
-    if instance.num_nodes <= 180: return 36.0
-    return 72.0
 def hybrid_seed_budget(instance):
     if instance.num_nodes <= 60: return 0.4
     if instance.num_nodes <= 180: return 0.8
     return 1.2
 def hgs_polish_slice(instance):
-    # Larger polish slices for big tight instances - SWAP*/CROSS need
-    # time to actually converge each call.
+
     if instance.num_nodes <= 60: return 0.40
     if instance.num_nodes <= 180: return 0.70
     return 1.50
 def hgs_neighbor_count(instance):
     if instance.num_nodes <= 80: return min(48, instance.num_nodes - 1)
     if instance.num_nodes <= 180: return 64
-    # 80 was generous; granular search literature suggests 30-40 is the
-    # sweet spot. 50 keeps SWAP*/CROSS coverage without burning cycles.
+
     return 50
 def initial_population_size(instance):
     if instance.num_nodes <= 60: return 8
